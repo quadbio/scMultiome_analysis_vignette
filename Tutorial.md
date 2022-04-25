@@ -19,6 +19,7 @@
  * [Section 2. Bi-modal integrative analysis of the RNA-ATAC scMultiome data](#section-2-bi-modal-integrative-analysis-of-the-rna-atac-scmultiome-data)
    * [Step 1. Weighted nearest neighbor analysis](#step-1-weighted-nearest-neighbor-analysis)
    * [Step 2. Cell type gene/peak marker identification and visualization of the chromatin accessibility profiles](#step-2-cell-type-genepeak-marker-identification-and-visualization-of-the-chromatin-accessibility-profiles)
+   * [Step 3. TF binding motif enrichment analysis](#step-3-tf-binding-motif-enrichment-analysis)
  * [Section 3. Gene regulatory network reconstruction](#section-3-gene-regulatory-network-reconstruction)
 
 
@@ -471,7 +472,89 @@ p1 | p2
 <span style="font-size:0.8em">*P.S. It is not always the best idea to generate UMAP representation and doing clustering using both modalities together. It really depends on the system and the question that one tries to answer. For instance, different cell lines may have their own genetic background and therefore some line-specific chromatin accessibility patterns that are independent from the cell types/states. In that case, if our focus is on the cell state transition and we realize that the unbiased ATAC analysis doesn't really provide much more information than the RNA assay only, doing UMAP embedding and clustering on RNA assay can also be a better option than the RNA-ATAC integrative counterpart.*</span>
 
 ### Step 2. Cell type gene/peak marker identification and visualization of the chromatin accessibility profiles
+With the cell type annotation we made, we can now apply differential expression analysis to compare each cell type versus the rest to identify gene markers for the cell type. Similarly, we can apply differential accessibility analysis to identify chromatin peaks which are accessible in a cell-type-specific manner. As mentioned above, both can be done via the ```FindMarkers``` function in ```Seurat``` (maybe with varied ```test``` parameters), or to be fast to use the ```wilcoxauc``` function in ```presto``` which relies on the non-parametric Wilcoxon test and the AUC values. Here we use ```wilcoxauc``` in this example script.
 
+```R
+library(presto)
 
+DefaultAssay(seurat) <- "RNA"
+DE_ct <- wilcoxauc(seurat, "celltype", seurat_assay = "RNA")
+top_markers_ct <- DE_ct %>%
+  filter(abs(logFC) > log(1.2) &
+         padj < 0.01 &
+         auc > 0.65 &
+         pct_in - pct_out > 30 &
+         pct_out < 20) %>%
+  group_by(group) %>%
+  top_n(10, wt = auc)
+
+top_markers_ct
+```
+<img src="images/top_markers_genes.png" align="centre" /><br/><br/>
+
+```R
+DefaultAssay(seurat) <- "ATAC"
+DA_ct <- wilcoxauc(seurat, "celltype", seurat_assay = "ATAC")
+top_peaks_ct <- DA_ct %>%
+  filter(abs(logFC) > log(1.1) &
+         padj < 0.01 &
+         auc > 0.55) %>%
+  group_by(group) %>%
+  top_n(100, wt = auc)
+
+marker_peak_ct %>% top_n(5, wt=auc)
+```
+<img src="images/top_markers_peaks.png" align="centre" /><br/><br/>
+
+Since we can obtain the RNA and ATAC profiles for the same cells, we can try to link a gene with its nearby peaks, which are its potential cis-regulatory elements. In ```Signac```, the ```LinkPeaks``` function implements exactly that. What it does is to calculate Pearson correlation between the expression of a gene across cells, and the accessibility of every nearby peak. This coefficient is then compared to the expected correlation given the GC content, general accessibility and peak length to derive the p-value. Peaks with significant p-values are then considered as the linked peaks to the gene. This analysis is pretty time-consuming due to the large amount of linear regression model to fit (one per gene). Therefore here we limit it to the top cell type markers we just identified.
+```R
+library(BSgenome.Hsapiens.UCSC.hg38)
+
+seurat <- RegionStats(seurat,
+                      genome = BSgenome.Hsapiens.UCSC.hg38)
+seurat <- LinkPeaks(seurat,
+                    peak.assay = "ATAC",
+                    expression.assay = "RNA",
+                    genes.use = top_markers_ct$feature)
+```
+<span style="font-size:0.8em">*P.S. The ```RegionStats``` function here is to calculate the GC content of peaks with the providing genome information in the ```BSgenome.Hsapiens.UCSC.hg38``` object. The function expects all the chromosomes in the ATAC assay should be included in the provided genome. Because the contig sequences are named differently in the Cell Ranger ARC reference than the standard UCSC-style hg38 genome, it would very likely return an error if ATAC peaks in those non-standard chromosomes are included. This is the reason why at the beginning we only keep the peaks in the standard chromosomes.*</span>
+
+With the markers identified, we can of course do some feature plots for them, and we can also do more than just feature plots. You probably still remember the ATAC fragment file information we provided when creating the ATAC assay in the Seurat object. With that we can check the chromatin accessibility patterns in different cell types for a given region (can be a peak or a gene). Now let's check some of the top marker genes and peaks.
+
+First let's check around the identified top marker genes RASGRP3 for endothelial cells and COL6A3 for mural cells. Since we've calculated the links between those marker genes and their nearby peaks, such information can also be shown in the same plot. 
+```R
+DefaultAssay(seurat) <- "ATAC"
+p1 <- CoveragePlot(seurat,
+                   region = "RASGRP3",
+                   features = "RASGRP3",
+                   group.by = "celltype",
+                   extend.upstream = 1000,
+                   extend.downstream = 1000)
+p2 <- CoveragePlot(seurat,
+                   region = "COL6A3",
+                   features = "COL6A3",
+                   group.by = "celltype",
+                   extend.upstream = 1000,
+                   extend.downstream = 1000)
+patchwork::wrap_plots(p1, p2, ncol = 1)
+```
+<img src="images/coverage_gene_markers.png" align="centre" /><br/><br/>
+
+```R
+p1 <- CoveragePlot(seurat,
+                   region = "chr1-34842652-34844740",
+                   group.by = "celltype",
+                   extend.upstream = 1000,
+                   extend.downstream = 1000)
+p2 <- CoveragePlot(seurat,
+                   region = "chr17-50209360-50211102",
+                   group.by = "celltype",
+                   extend.upstream = 1000,
+                   extend.downstream = 1000)
+patchwork::wrap_plots(p1, p2, ncol = 1)
+```
+<img src="images/coverage_peak_markers.png" align="centre" /><br/><br/>
+
+### Step 3. TF binding motif enrichment analysis
 
 ## Section 3. Gene regulatory network reconstruction
