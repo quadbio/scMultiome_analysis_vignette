@@ -16,7 +16,6 @@
      * [Step 4.4. Non-linear dimension reduction with UMAP for visualization](#step-44-non-linear-dimension-reduction-with-umap-for-visualization)
      * [Step 4.O. What if we don't have the RNA information](#step-4o-what-if-we-dont-have-the-rna-information)
      * [Step 4.5. Data integration of the ATAC assay](#step-45-data-integration-of-the-atac-assay)
-     * [Step 4.6. Clustering and marker peak identification](#step-46-clustering-and-marker-peak-identification)
  * [Section 2. Bi-modal integrative analysis of the RNA-ATAC scMultiome data](#section-2-bi-modal-integrative-analysis-of-the-rna-atac-scmultiome-data)
  * [Section 3. Gene regulatory network reconstruction](#section-3-gene-regulatory-network-reconstruction)
 
@@ -214,6 +213,7 @@ p1 | p2
 There seems to be pretty strong batch effect between the two biological replicates, and we shall therefore try to do data integration. There are quite many integration methods developed for scRNA-seq data, some of which have been introduced in [the other tutorial](https://github.com/quadbiolab/scRNAseq_analysis_vignette). Usually the suggestion would be to try several and then choose one based on how well different samples are mixed and whether the feature plots make sense when checking the marker expression of some expected cell types; but here we will directly use [CSS](https://github.com/quadbiolab/simspec) which was also used in the original paper introducing this data set.
 
 ```R
+library(simspec)
 seurat <- cluster_sim_spectrum(seurat,
                                label_tag = "orig.ident",
                                cluster_resolution = 0.6,
@@ -339,12 +339,93 @@ p1 | p2 | p3
 Although the signal is much less clear than the real RNA assay, we can still see the cell populations on the left have higher predicted activity of PDGFRB and COL5A1, while the right ones have higher predicted CLDN5 activity. This is consistent with the real gene expression information.
 
 #### Step 4.5. Data integration of the ATAC assay
-As we see the potential batch effect also in the ATAC assay, we shall then consider doing data integration or batch effect correction for the ATAC assay just like what we do for the RNA assay. While most of the data integration methods were developed for scRNA-seq data, many of them are also applicable to the ATAC assay. Those methods include but not limit to [Seurat](https://satijalab.org/signac/articles/integrate_atac.html), [Harmony](https://portals.broadinstitute.org/harmony/) and [CSS](https://github.com/quadbiolab/simspec).
+As we see the potential batch effect also in the ATAC assay, we shall then consider doing data integration or batch effect correction for the ATAC assay just like what we do for the RNA assay. While most of the data integration methods were developed for scRNA-seq data, many of them are also applicable to the ATAC assay. Those methods include but not limit to [Seurat](https://satijalab.org/signac/articles/integrate_atac.html), [Harmony](https://portals.broadinstitute.org/harmony/) and [CSS](https://github.com/quadbiolab/simspec). The way of using those integration methods is also quite similar to when applying them to the RNA assay.
 
-#### Step 4.6. Clustering and marker peak identification
+For CSS and Harmony, just to make sure that it should be the SVD embedding (by default called "lsi") instead of the PCA embedding (by default called "pca") being used as the input.
 
+```R
+DefaultAssay(seurat) <- "ATAC"
+
+library(simspec)
+seurat <- cluster_sim_spectrum(seurat,
+                               label_tag = "orig.ident",
+                               use_dr = "lsi",
+                               dims_use = 2:30,
+                               cluster_resolution = 0.6,
+                               reduction.name = "css_atac",
+                               reduction.key = "CSSATAC_")
+seurat <- RunUMAP(seurat,
+                  reduction = "css_atac",
+                  dims = 1:ncol(Embeddings(seurat,"css_atac")),
+                  reduction.name = "umap_css_atac",
+                  reduction.key = "UMAPCSSATAC_")
+
+library(harmony)
+seurat <- RunHarmony(seurat,
+                     group.by.vars = "orig.ident",
+                     reduction = "lsi",
+                     dims.use = 2:30,
+                     max.iter.harmony = 50,
+                     reduction.save = "harmony_atac")
+seurat <- RunUMAP(seurat,
+                  reduction = "harmony_atac",
+                  dims = 1:ncol(Embeddings(seurat,"harmony_atac")),
+                  reduction.name = "umap_harmony_atac",
+                  reduction.key = "UMAPHARMONYATAC_")
+```
+
+For Seurat it is a bit different. The first step is still to identify the anchors, although using the reduction method "rlsi" instead of the default value "cca" for the RNA assay. The second step is different. Instead of using the ```IntegrateData``` function in the RNA assay to impute the integrated gene expression, here it will be the SVD embedding being integrated to generate a new integrated embeddings. This step relies on the function ```IntegrateEmbeddings```.
+
+```R
+integration.anchors <- FindIntegrationAnchors(
+  object.list = SplitObject(seurat, "orig.ident"),
+  anchor.features = rownames(seurat),
+  reduction = "rlsi",
+  dims = 2:30
+)
+seurat_integrated <- IntegrateEmbeddings(
+  anchorset = integration.anchors,
+  reductions = seurat[["lsi"]],
+  new.reduction.name = "integrated_lsi",
+  dims.to.integrate = 1:30
+)
+seurat[['integrated_lsi_atac']] <- CreateDimReducObject(
+  Embeddings(seurat_integrated, "integrated_lsi")[colnames(seurat),], key="INTEGRATEDLSIATAC_", assay="ATAC"
+)
+seurat <- RunUMAP(seurat,
+                  reduction = "integrated_lsi_atac",
+                  dims = 2:30,
+                  reduction.name = "umap_seurat_atac",
+                  reduction.key = "UMAPSEURATATAC_")
+```
+
+Now we can visualize and compare the results
+
+```R
+DefaultAssay(seurat) <- "RNA"
+Reduce("|", lapply(c("umap_atac",
+                     "umap_css_atac",
+                     "umap_harmony_atac",
+                     "umap_seurat_atac"), function(dr){
+  p1 <- DimPlot(seurat,
+                group.by = "orig.ident",
+                reduction = dr) & NoAxes()
+  p2 <- FeaturePlot(seurat,
+                    c("PDGFB","CLDN5","PDGFRB","COL5A1"),
+                    reduction = dr) & NoAxes() & NoLegend()
+  p1 / p2
+}))
+```
+<img src="images/umap_atac_integrated.png" align="centre" /><br/><br/>
+
+Generally speaking, all the three integration methods work to reduce the difference between the two replicates. In the following analysis, the CSS-integrated one would be used to be in line with the original publication.
+
+With or without the data being integrated, we can also do clustering based on the ATAC data using the same procedure as for the RNA assay. Similarly, we can also do marker identification using the ```FindMarkers``` function in ```Seurat``` (recommended to use ```test.use = 'LR'```, which also allows additional confounding covariates being considered by setting the ```latent.vars``` parameter), or the ```wilcoxauc``` function in ```presto``` for the fast Wilcoxon test. Here we don't show the details.
 
 ## Section 2. Bi-modal integrative analysis of the RNA-ATAC scMultiome data
+Since we have both the RNA and ATAC information in the scMultiome experiment, and they may have different capacity discriminating different cell populations, it would be good to try if we can integrate the information from both sides for the heterogeneity analysis. What's more, combining the RNA and ATAC information may also allow us to look deeper into the transcriptional regulation, for example, to identify potential transcription factors which are important to define cell type identities. In this section, we will briefly show how these analysis can be done with ```Seurat``` and ```Signac``` in R.
 
+### Step 1. 
+In ```Seurat```, this is achievable via the weighted nearest neighbor graph method.
 
 ## Section 3. Gene regulatory network reconstruction
