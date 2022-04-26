@@ -20,6 +20,7 @@
    * [Step 1. Weighted nearest neighbor analysis](#step-1-weighted-nearest-neighbor-analysis)
    * [Step 2. Cell type gene/peak marker identification and visualization of the chromatin accessibility profiles](#step-2-cell-type-genepeak-marker-identification-and-visualization-of-the-chromatin-accessibility-profiles)
    * [Step 3. TF binding motif enrichment analysis](#step-3-tf-binding-motif-enrichment-analysis)
+   * [Step 4. ChromVAR: another motif enrichment analysis](#step-4-chromvar-another-motif-enrichment-analysis)
  * [Section 3. Gene regulatory network reconstruction](#section-3-gene-regulatory-network-reconstruction)
 
 
@@ -556,5 +557,251 @@ patchwork::wrap_plots(p1, p2, ncol = 1)
 <img src="images/coverage_peak_markers.png" align="centre" /><br/><br/>
 
 ### Step 3. TF binding motif enrichment analysis
+The previous analysis can help us to identify putative cis-regulatory elements that are critical for regulating cell type identity or cell state transitions. This is usually achieved via the binding of certain trans-regulators, e.g. TFs, to those open chromatin regions. The binding of most TFs have strong sequence specificity, which can be summarized into sequence motifs, i.e. the TF binding motifs. If certain TFs play important roles in those regulations, it is very likely that the cell-type-specific peaks are regions enriched for the binding, with their genomic sequences enriched for the corresponding TF binding motifs. In this case, by checking the motifs enriched in those cell-type-specific peaks, we may be then able to identify TFs responsible for establishment and maintanence of cell type identity.
+
+To do that, we also need a database of TF binding motifs. Indeed, there are several commonly used databases, including the commercial ones like [TRANSFAC](https://genexplain.com/transfac/) and open source ones like [JASPAR](https://jaspar.genereg.net/). By scanning for sequences matching those motifs, we can predict possible binding sites of the TFs with binding motif information in the databases, and then check their enrichment in the peak list of interest in relative to the other peaks.
+
+To do the motif scanning, we can use the ```AddMotifs``` function in ```Signac```, given the list of binding motifs in the format of ```PFMatrixList``` defined in the ```TFBSTools``` package. We can retrieve the JASPAR database, and then convert it to the format in need.
+
+```R
+library(TFBSTools)
+library(JASPAR2020)
+
+pfm <- getMatrixSet(
+  x = JASPAR2020,
+  opts = list(collection = "CORE", tax_group = 'vertebrates', all_versions = FALSE)
+)
+df_pfm <- data.frame(t(sapply(pfm, function(x)
+  c(id=x@ID, name=x@name, symbol=ifelse(!is.null(x@tags$symbol),x@tags$symbol,NA)))))
+
+seurat <- AddMotifs(seurat, genome = BSgenome.Hsapiens.UCSC.hg38, pfm = pfm)
+```
+<span style="font-size:0.8em">*P.S. The ```AddMotifs``` function is a bit time-consuming, as it needs to look through the sequence of all peaks in the peak list of the ATAC assay given the genome information in the ```BSgenome.Hsapiens.UCSC.hg38``` object. This is another reason why at the beginning we only keep the peaks in the standard chromosomes, as the sequences of peaks at the non-standard chromosome will be likely missing due to the different naming style of those contigs.*</span>
+
+Now we can use the ```FindMotifs``` function in ```Signac``` to identify enriched TF binding motifs in a provided peak list, for instance, the cell-type-specific accessible peaks. Similar to the functional enrichment analysis for inferring possible gene set function, the motif enrichment analysis also requires a background set. By default, it randomly selects 40000 peaks from the whole peak list. Alternatively, we can define the background peak list based on their accessibility in certain cell types, for instance, as well as peaks with matched GC content as the peak list of interest.
+
+```R
+open_peaks <- AccessiblePeaks(seurat)
+peaks_matched <- MatchRegionStats(meta.feature = seurat[['ATAC']]@meta.features[open_peaks, ],
+                                  query.feature = seurat[['ATAC']]@meta.features[marker_peak_ct$feature, ],
+                                  n = 50000)
+
+motif_enrichment_endo <- FindMotifs(seurat,
+                                    features = top_peaks_ct$feature[top_peaks_ct$group == "endothelial"],
+                                    background = peaks_matched) %>%
+  mutate(symbol = setNames(ifelse(is.na(df_pfm$symbol), df_pfm$name, df_pfm$symbol), df_pfm$id)[motif]) %>%
+  mutate(padj = p.adjust(pvalue, method="BH"))
+enriched_motif_endo <- motif_enrichment_endo %>%
+  filter(padj < 0.01 & fold.enrichment > 3) %>%
+  top_n(-4, wt = padj)
+
+motif_enrichment_mural <- FindMotifs(seurat,
+                                     features = top_peaks_ct$feature[top_peaks_ct$group == "mural"],
+                                     background = peaks_matched) %>%
+  mutate(symbol = setNames(ifelse(is.na(df_pfm$symbol), df_pfm$name, df_pfm$symbol), df_pfm$id)[motif]) %>%
+  mutate(padj = p.adjust(pvalue, method="BH"))
+enriched_motif_mural <- motif_enrichment_mural %>%
+  filter(padj < 0.01 & fold.enrichment > 3) %>%
+  top_n(-4, wt = padj)
+```
+
+Now we can visualize the top-4 overrepresented TF binding motifs in endothelial cells (top) and mural cells (botton)
+```R
+p1 <- MotifPlot(seurat, motifs = enriched_motif_endo$motif[1:4], ncol=4)
+p2 <- MotifPlot(seurat, motifs = enriched_motif_mural$motif[1:4], ncol=4)
+p1 / p2
+```
+<img src="images/enriched_motifs.png" align="centre" /><br/><br/>
+
+We can also check the expression of the corresponding TFs with feature plots.
+```R
+DefaultAssay(seurat) <- "RNA"
+p1 <- FeaturePlot(seurat,
+                  c("SOX13","SOX8","SOX6","SOX15"),
+                  reduction="umap",
+                  order=T,
+                  ncol=4) & NoAxes() & NoLegend()
+p2 <- FeaturePlot(seurat,
+                  c("NR2C2","PBX2","PPARD","CDX4"),
+                  reduction="umap",
+                  order=T,
+                  ncol=4) & NoAxes() & NoLegend()
+p1 / p2
+```
+<img src="images/umap_enriched_motifs_tf.png" align="centre" /><br/><br/>
+
+Unfortunately the expression of these eight TFs don't look very cell type specific. There are different possibilities here. It could be that these enrichments are not biological relevant and their corresponding TFs are not the critical factors in defining the endothelial and mural cell identities. The other possibility is that some ubiquitously expressed TFs can bind to cell-type-specific enhancers and therefore regulate different downstream target genes in different cell types. One needs to check in more details, and also check more motifs instead of just the top-4.
+
+### Step 4. ChromVAR: another motif enrichment analysis
+Another way of motif enrichment analysis which doesn't require the input of a specific list of peaks of interest is the [chromVAR](https://greenleaflab.github.io/chromVAR/index.html) analysis, developed by the Greenleaf lab in Stanford University. This method estimates motif activity scores for each motif on cell level. In brief, for each motif in each cell, it counts the number of ATAC fragments mapped to those peaks, and normalizes by the expected numbers based on the average of all cells to get the raw accessibility score. Next, a background peak set is created with comparable GC content and average accessibility as the motif peaks, and to obtain similar raw accessibility score for the background. The background accessibility score is then used to normalize the accessibility score of the motif to get the corrected accessibility score of the motif in each cell. More details can be seen in the [chromVAR paper](https://www.nature.com/articles/nmeth.4401).
+
+In ```Signac```, a wrapper function to run chromVAR on the ATAC assay is implemented as ```RunChromVAR```. It requires the ```chromVAR``` package being installed (via Bioconductor with ```BiocManager::install("chromVAR")```).
+```R
+seurat <- RunChromVAR(seurat, genome = BSgenome.Hsapiens.UCSC.hg38)
+```
+
+This creates a new assay in the Seurat object, namely "chromvar" by default. It contains the JASPAR motifs we added to the Seurat object above as the features, and the chromVAR estimated accessibility scores of those motifs in all cells. We can then do the differential activity analysis between cell types to identify motifs that show cell type specific enrichment. Similarly, this can be done with ```FindMarkers``` in ```Seurat```, ```wilcoxauc``` in ```presto``` or other statistical tests.
+```R
+DefaultAssay(seurat) <- "chromvar"
+DA_motifs_ct <- wilcoxauc(seurat, group_by = "celltype", seurat_assay = "chromvar") %>%
+  mutate(symbol = setNames(ifelse(is.na(df_pfm$symbol), df_pfm$name, df_pfm$symbol),
+                           df_pfm$id)[feature])
+
+enriched_motifs_ct <- DA_motifs_ct %>%
+  filter(padj < 0.01 & auc > 0.7) %>%
+  group_by(group)
+top_motifs_ct <- top_n(enriched_motifs_ct, 3, wt=auc)
+```
+
+We can use feature plots to visualize the enrichment profiles directly.
+```R
+bluered_colscheme <- colorRampPalette(rev(c("#d73027","#f46d43","#fdae61","#fee090","#e0f3f8","#abd9e9","#74add1","#4575b4")))
+FeaturePlot(seurat,
+            features = top_motifs_ct$feature,
+            cols = bluered_colscheme(30),
+            reduction = "umap",
+            ncol = 3) & NoAxes() & NoLegend()
+```
+<img src="images/umap_chromvar.png" align="centre" /><br/><br/>
+
+This analysis result can be further looked into together with the DE analysis on TFs between cell types. We can obtain the list of TFs from the animalTFDB database. Here we provide the list as a part of the tutorial as well. What we can do then is to further filter the marker TFs requiring their motifs being enriched in the same cell type.
+```R
+tfs <- read.table("extdata/Homo_sapiens_TF.txt", sep="\t", header=T)
+
+tf_motifs_ct <- enriched_motifs_ct %>%
+  filter(symbol %in% tfs$Symbol)
+marker_tfs_ct <- DE_ct %>%
+  filter(feature %in% tfs$Symbol &
+         abs(logFC) > log(1.2) &
+         padj < 0.01 &
+         auc > 0.65 &
+         pct_in - pct_out > 20) %>%
+  inner_join(tf_motifs_ct,
+             by = c("feature" = "symbol"),
+             suffix = c("_tf","_motif")) %>%
+  filter(group_tf == group_motif)
+
+top_tfs_ct <- group_by(marker_tfs_ct, group_tf) %>%
+  top_n(3, wt = auc_motif)
+
+beach_colscheme <- colorRampPalette(c("#cdcdcd","#edf8b1","#7fcdbb","#41b6c4","#1d91c0","#225ea8","#0c2c84"))
+DefaultAssay(seurat) <- "RNA"
+p1 <- FeaturePlot(seurat,
+                  top_tfs_ct$feature,
+                  reduction = "umap",
+                  order=T,
+                  cols=beach_colscheme(30),
+                  ncol=6) & NoAxes() & NoLegend()
+DefaultAssay(seurat) <- "chromvar"
+p2 <- FeaturePlot(seurat,
+                  top_tfs_ct$feature_motif,
+                  reduction = "umap",
+                  order=T,
+                  cols=bluered_colscheme(30),
+                  ncol=6) & NoAxes() & NoLegend()
+p1 / p2
+```
+<img src="images/umap_chromvar_tfs.png" align="centre" /><br/><br/>
+
 
 ## Section 3. Gene regulatory network reconstruction
+In the previous section, we show some examples of how we can integrate the RNA and ATAC assays to identify cell type heterogeneity in the data, as well as to look for putative cis- and trans-regulatory elements that could be important for cell type/state identity establishment, maintanence and transition. Meanwhile, there is another way of looking at the data, that is, instead of focusing on different cell populations, we focus on relationship between genes, or more specifically, to identify the regulatory relationship of different TFs interacting with different cis-regulatory elements in order to regulate the transcription of different target genes. This is so-call the gene regulatory network (GRN) analysis.
+
+How to accurately and quantitatively reconstruct a GRN is a tough question and still remained to be answered in a nice way. Still, people have spent lots of effort and developed many tools aiming to solve the problem at least partially. One of the first attempts is to check expression correlation between different genes, and therefore to reconstruct a co-expression network followed by co-expression modules identification. Each of the co-expression modules contains genes that are supposed to be regulated together, whose regulators can be hopefully identified via TF binding motif enrichment analysis, for instance. One typical example of this type of methods is [WGCNA](https://bmcbioinformatics.biomedcentral.com/articles/10.1186/1471-2105-9-559), short for Weighted Gene Coexpression Network Analysis, which is widely used in bulk transcriptome data analysis.
+
+Another strategy is to consider the expression of one gene to be a function of the expression of its regulators (mostly TFs). The solution is then to fit a linear or non-linear regression model using the target gene expression in different samples as the response, while the expression of all possible regulators in samples as covariates. This is usually followed by statistical test to determine whether any covariate contributes to the target gene expression significantly, or includes regularization for feature selection. Examples of this type of method include [GENIE3](https://bioconductor.org/packages/devel/bioc/html/GENIE3.html) and [GRNBoost2](https://academic.oup.com/bioinformatics/article/35/12/2159/5184284). Many of those methods have also been shown being applicable in single-cell transcriptomic data.
+
+Although those methods can provide very useful information of possible regulatory mechanisms,they purely rely on expression of TFs and putative target genes, ignoring the biology that the target gene needs to contain the binding motif of a certain TF at its cis-regulatory elements, either its promoter or enhancers for the TF to regulate. To further improve and push the analysis closer to biology, people started to build up pipelines which takes into account both expression and TF binding site prediction. [SCENIC](https://scenic.aertslab.org/), developed by the Aerts lab in KU Leuven Center for Human Genetics and the VIB Center for Brain and Disease Research that also developed GRNBoost2, implements a filtering step after inferring the raw network with GRNBoost2, excluding the inferred regulations that lack of corresponding TF binding motif at the target gene's promoter region. More information can be seen in its [paper](https://www.nature.com/articles/nmeth.4463). [CellOracle](https://morris-lab.github.io/CellOracle.documentation/) implements this in a different way, by firstly looking for putative TFs of a gene via motif searching at its putative promoter and enhancers based on public data or additional ATAC-seq data, for instance, and then use a regularized linear regression model that only contains TFs with predicted binding motifs to further infer the relationship between TFs and the target gene quantitatively. More information can be found in its [preprint](https://www.biorxiv.org/content/10.1101/2020.02.17.947416v3).
+
+Now with the scMultiome data, we have the chance to even quantitatively involve the chromatin accessibility profile to the model to infer GRN. That is the rationale behind [Pando](https://quadbiolab.github.io/Pando/). It firstly scans for TF binding motifs at each peak in the ATAC assay of the scMultiome data, with further filtering based on sequence conservation and public regulatory element databases (e.g. ENCODE), and then for each gene, build a linear regression model considering not only the expression of those TFs with any predicted binding sites that may regulate the gene, but also its interaction with the peak accessibility that the putative TF binding site is located. More details can be read in the [biorxiv preprint](https://www.biorxiv.org/content/10.1101/2021.08.24.457460v1). In the following part of the tutorial, we will briefly show how to run Pando in the scMultiome data to identify potential targets of TFs.
+
+Pando can be installed via ```devtools::install_github("quadbiolab/Pando")```. Once the installation is done we can import the package into the R environment.
+```R
+library(Pando)
+```
+
+Once Pando is imported, we need to initialize a Pando-compatible Seurat object. This step also insert the sequence conservation information in the form of phastCons scores, which is derived from mult-species whole genome alignment and ranged between 0 and 1, with 1 meaning identical in all genomes.
+```R
+seurat <- initiate_grn(seurat,
+                       regions=phastConsElements20Mammals.UCSC.hg38,
+                       rna_assay = "RNA", peak_assay = "ATAC")
+```
+
+Next we need to incorporate the TF binding motif information into the object. We can use the JASPAR database as mentioned above, or Pando also contains an extended database that contains not only the information in JASPAR, but also some extra motif information from CIS-BP database as well as the sequence-similarity-based transferred motifs for TFs without any annotated motif information in either JASPAR or CIS-BP. Here we directly use the Pando-extended database.
+```R
+seurat <- find_motifs(seurat,
+                      pfm = Pando::motifs,
+                      motif_tfs = Pando::motif2tf,
+                      genome = BSgenome.Hsapiens.UCSC.hg38)
+```
+This function calls the ```AddMotifs``` function in ```Signac``` to scan for TF binding motifs at the peaks.
+
+Now we can start to run Pando. Pando supports any multithreads parallelization method in R that implements the ```foreach``` function. Here we use the ```doParallel``` package to run ```Pando``` with 20 cores.
+```R
+library(doParallel)
+registerDoParallel(20)
+seurat <- infer_grn(seurat,
+                    parallel = T,
+                    tf_cor = 0.05,
+                    method="glm",
+                    family="gaussian",
+                    scale=F,
+                    verbose=T)
+```
+The important parameters of the ```infer_grn``` function includes ```tf_cor``` which pre-filter only TFs with sufficient correlation with the gene in the model. ```peak_cor``` does similar pre-filtering but for the peaks. ```peak_to_gene_method```, ```upstream```, ```downstream```, and ```extend``` together determine which peaks are linked to a gene. The ```method``` parameter claims the regression model to use. More information can be seen in the [function manual](https://quadbiolab.github.io/Pando/reference/infer_grn.html).
+
+This step will take a while. Once it is done, we can extract the TF-peak-target trios with significant p-values.
+```R
+grn <- seurat@grn@networks$glm_network@coefs %>%
+  filter(padj < 0.01)
+
+grn
+```
+<img src="images/grn_df.png" align="centre" /><br/><br/>
+
+With this information we can now generate the list of regulons, which are genes that are co-regulated positively or negatively by the same TF. Afterwards, we can use the ```AddModuleScore``` in ```Seurat``` to calculate the regulon activity score for each regulon in each cell. This information can be then incorporated into the Seurat object as an extra assay (in the example we call it 'regulon').
+
+```R
+positive_regulons <- split(grn$target[grn$estimate>0], grn$tf[grn$estimate>0])
+positive_regulons <- positive_regulons[lengths(positive_regulons) > 10]
+negative_regulons <- split(grn$target[grn$estimate<0], grn$tf[grn$estimate<0])
+negative_regulons <- negative_regulons[lengths(negative_regulons) > 10]
+
+DefaultAssay(seurat) <- "RNA"
+mod_act_pos <- AddModuleScore(seurat,
+                              features = positive_regulons,
+                              name = "regulon_")@meta.data
+mod_act_pos <- mod_act_pos[,grep("^regulon_", colnames(mod_act_pos))] %>%
+  setNames(paste0(names(positive_regulons),"(+)"))
+mod_act_neg <- AddModuleScore(seurat,
+                              features = negative_regulons,
+                              name = "regulon_")@meta.data
+mod_act_neg <- mod_act_neg[,grep("^regulon_", colnames(mod_act_neg))] %>%
+  setNames(paste0(names(negative_regulons),"(-)"))
+
+seurat[['regulon']] <- CreateAssayObject(data = t(cbind(mod_act_pos, mod_act_neg)))
+```
+
+Now we can do the feature plots for the same TFs we found combining DE and chromVAR analysis, and their positive and negative regulons.
+```R
+DefaultAssay(seurat) <- "RNA"
+p1 <- FeaturePlot(seurat,
+                  top_tfs_ct$feature,
+                  reduction = "umap",
+                  cols = beach_colscheme(30),
+                  order = T,
+                  ncol = 6) & NoAxes() & NoLegend()
+DefaultAssay(seurat) <- "regulon"
+p2 <- FeaturePlot(seurat,
+                  features = c(intersect(paste0(top_tfs_ct$feature,"(+)"), rownames(seurat)),
+                               intersect(paste0(top_tfs_ct$feature,"(-)"), rownames(seurat))),
+                  reduction = "umap",
+                  cols = bluered_colscheme(30),
+                  order = T,
+                  ncol = 6) & NoAxes() & NoLegend()
+(p1 / p2) + patchwork::plot_layout(height = c(1,2))
+```
+<img src="images/umap_pando_regulon.png" align="centre" /><br/><br/>
+
+There are much more analysis, particularly those graph-based analysis, that can be done to the GRN, such as centrality analysis to identify TFs which may trigger huge regulatory cascades. One can also visualize the TF cross-regulatory network.
+
