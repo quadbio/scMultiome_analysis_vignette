@@ -1,6 +1,6 @@
 # Tutorial of single-cell RNA-ATAC multiomic sequencing data analysis in R
 #### Compiled by Zhisong He, Barbara Treutlein
-#### Updated on 2022-04-25
+#### Updated on 2022-04-26
 ### Table of Content
  * [Introduction](#introduction)
  * [Preparation](#preparation)
