@@ -1,6 +1,6 @@
 # Tutorial of single-cell RNA-ATAC multiomic sequencing data analysis in R
 #### Compiled by Zhisong He, Barbara Treutlein
-#### Updated on 2022-04-26
+#### Updated on 2024-04-18
 ### Table of Content
  * [Introduction](#introduction)
  * [Preparation](#preparation)
@@ -62,6 +62,7 @@ For the RNA assay, the count matrix is already sufficient. For the ATAC assay, o
 
 Firstly let's retrieve the gene annotation.
 ```R
+library(AnnotationHub)
 ah <- AnnotationHub()
 ensdbs <- query(ah, c("EnsDb.Hsapiens"))
 
@@ -73,6 +74,8 @@ annotations <- GetGRangesFromEnsDb(ensdb = ensdb)
 genome(annotations) <- "hg38"
 ```
 Here we use the human gene annotation in Ensembl v98 database. This is also the version of annotation used for the RNA assay. The chromosome name is set to have the UCSC style so that they are called "chr1", "chr2" etc. rather than "1", "2" etc. so that they match with the name used in the reference genome used by the default Cell Ranger ARC pipeline.
+
+<span style="font-size:0.8em">*P.S. The `AnnotationHub` can be easily installed via `BiocManager::install('AnnotationHub')`. Meanwhile to make sure the above codes work, you also need two extra packages, `ensembldb` and `biovizBase`. They can be installed similarly via `BiocManager::install(c('ensembldb','biovizBase'))`.*</span>
 
 Next, we create the Seurat object for each sample, using the expression count matrix to generate the RNA assay, and the ATAC fragment count matrix as well as the above retrieved annotation and the link to the fragment table file to generate the ATAC assay.
 ```R
