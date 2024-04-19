@@ -1,6 +1,6 @@
 # Tutorial of single-cell RNA-ATAC multiomic sequencing data analysis in R
 #### Compiled by Zhisong He, Barbara Treutlein
-#### Updated on 2024-04-18
+#### Updated on 2024-04-19
 ### Table of Content
  * [Introduction](#introduction)
  * [Preparation](#preparation)
@@ -718,56 +718,63 @@ Although those methods can provide very useful information of possible regulator
 
 Now with the scMultiome data, we have the chance to even quantitatively involve the chromatin accessibility profile to the model to infer GRN. That is the rationale behind [Pando](https://quadbiolab.github.io/Pando/). It firstly scans for TF binding motifs at each peak in the ATAC assay of the scMultiome data, with further filtering based on sequence conservation and public regulatory element databases (e.g. ENCODE), and then for each gene, build a linear regression model considering not only the expression of those TFs with any predicted binding sites that may regulate the gene, but also its interaction with the peak accessibility that the putative TF binding site is located. More details can be read in the [biorxiv preprint](https://www.biorxiv.org/content/10.1101/2021.08.24.457460v1). In the following part of the tutorial, we will briefly show how to run Pando in the scMultiome data to identify potential targets of TFs.
 
-Pando can be installed via ```devtools::install_github("quadbiolab/Pando")```. Once the installation is done we can import the package into the R environment.
+<span style="font-size:0.8em">*P.S. Pando had a major upgrade to change its defined data structure, which was to avoid possible effect by any major change to the data structure of Seurat objects in the future. The following tutorial session has therefore been updated to adapt to the changes.*</span>
+
+Pando can be installed via ```devtools::install_github("quadbio/Pando")```. Once the installation is done we can import the package into the R environment.
 ```R
 library(Pando)
 ```
 
 Once Pando is imported, we need to initialize a Pando-compatible Seurat object. This step also insert the sequence conservation information in the form of phastCons scores, which is derived from mult-species whole genome alignment and ranged between 0 and 1, with 1 meaning identical in all genomes.
 ```R
-seurat <- initiate_grn(seurat,
-                       regions=phastConsElements20Mammals.UCSC.hg38,
-                       rna_assay = "RNA", peak_assay = "ATAC")
+grn <- initiate_grn(seurat,
+                    regions=phastConsElements20Mammals.UCSC.hg38,
+                    rna_assay = "RNA", peak_assay = "ATAC")
 ```
 
 Next we need to incorporate the TF binding motif information into the object. We can use the JASPAR database as mentioned above, or Pando also contains an extended database that contains not only the information in JASPAR, but also some extra motif information from CIS-BP database as well as the sequence-similarity-based transferred motifs for TFs without any annotated motif information in either JASPAR or CIS-BP. Here we directly use the Pando-extended database.
 ```R
-seurat <- find_motifs(seurat,
-                      pfm = Pando::motifs,
-                      motif_tfs = Pando::motif2tf,
-                      genome = BSgenome.Hsapiens.UCSC.hg38)
+grn <- find_motifs(grn,
+                   pfm = Pando::motifs,
+                   motif_tfs = Pando::motif2tf,
+                   genome = BSgenome.Hsapiens.UCSC.hg38)
 ```
 This function calls the ```AddMotifs``` function in ```Signac``` to scan for TF binding motifs at the peaks.
 
-Now we can start to run Pando. Pando supports any multithreads parallelization method in R that implements the ```foreach``` function. Here we use the ```doParallel``` package to run ```Pando``` with 20 cores.
+Now we can start to run Pando. Pando supports any multithreads parallelization method in R that implements the ```foreach``` function. Here we use the ```doParallel``` package to run ```Pando``` with 20 cores. Do modify this number if it is too much for you. If you don't need parallelization at all, skip the first two lines and directly run `infer_grn`. 
 ```R
 library(doParallel)
 registerDoParallel(20)
-seurat <- infer_grn(seurat,
-                    parallel = T,
-                    tf_cor = 0.05,
-                    method="glm",
-                    family="gaussian",
-                    scale=F,
-                    verbose=T)
+grn <- infer_grn(grn,
+                 peak_to_gene_method='Signac',
+                 parallel = T,
+                 tf_cor = 0.05,
+                 method="glm",
+                 family="gaussian",
+                 scale=F,
+                 verbose=T)
 ```
 The important parameters of the ```infer_grn``` function includes ```tf_cor``` which pre-filter only TFs with sufficient correlation with the gene in the model. ```peak_cor``` does similar pre-filtering but for the peaks. ```peak_to_gene_method```, ```upstream```, ```downstream```, and ```extend``` together determine which peaks are linked to a gene. The ```method``` parameter claims the regression model to use. More information can be seen in the [function manual](https://quadbiolab.github.io/Pando/reference/infer_grn.html).
 
 This step will take a while. Once it is done, we can extract the TF-peak-target trios with significant p-values.
 ```R
-grn <- seurat@grn@networks$glm_network@coefs %>%
+coef_grn <- coef(grn_object) %>%
   filter(padj < 0.01)
 
-grn
+coef_grn
 ```
 <img src="images/grn_df.png" align="centre" /><br/><br/>
 
 With this information we can now generate the list of regulons, which are genes that are co-regulated positively or negatively by the same TF. Afterwards, we can use the ```AddModuleScore``` in ```Seurat``` to calculate the regulon activity score for each regulon in each cell. This information can be then incorporated into the Seurat object as an extra assay (in the example we call it 'regulon').
 
 ```R
-positive_regulons <- split(grn$target[grn$estimate>0], grn$tf[grn$estimate>0])
+grn_object <- find_modules(grn_object,
+                           p_thresh = 0.01)
+regulons <- NetworkModules(grn_object)
+
+positive_regulons <- regulons[['genes_pos']]
 positive_regulons <- positive_regulons[lengths(positive_regulons) > 10]
-negative_regulons <- split(grn$target[grn$estimate<0], grn$tf[grn$estimate<0])
+negative_regulons <- regulons[['genes_neg']]
 negative_regulons <- negative_regulons[lengths(negative_regulons) > 10]
 
 DefaultAssay(seurat) <- "RNA"
