@@ -1,6 +1,6 @@
 # Tutorial of single-cell RNA-ATAC multiomic sequencing data analysis in R
 #### Compiled by Zhisong He, Barbara Treutlein
-#### Updated on 2024-04-19
+#### Updated on 2024-04-22
 ### Table of Content
  * [Introduction](#introduction)
  * [Preparation](#preparation)
@@ -772,9 +772,9 @@ grn_object <- find_modules(grn_object,
                            p_thresh = 0.01)
 regulons <- NetworkModules(grn_object)
 
-positive_regulons <- regulons[['genes_pos']]
+positive_regulons <- regulons@features[['genes_pos']]
 positive_regulons <- positive_regulons[lengths(positive_regulons) > 10]
-negative_regulons <- regulons[['genes_neg']]
+negative_regulons <- regulons@features[['genes_neg']]
 negative_regulons <- negative_regulons[lengths(negative_regulons) > 10]
 
 DefaultAssay(seurat) <- "RNA"
